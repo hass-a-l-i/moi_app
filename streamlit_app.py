@@ -1094,10 +1094,19 @@ def password_gate() -> None:
     st.html(
         f"""
         <div class="hero">
-            <div class="hero-icon">{WORLD_ICON_HTML}</div>
-            <div class="eyebrow">Private diary</div>
+            <div class="hero-icon">
+                {WORLD_ICON_HTML}
+            </div>
+
+            <div class="eyebrow">
+                Today is a {WORLD_NAME} day.
+            </div>
+
             <h1>{HER_NAME}</h1>
-            <p>Unlock your daily moment.</p>
+
+            <p>
+                This is a safe space where you can check in with yourself.
+            </p>
         </div>
         """
     )
@@ -1117,11 +1126,6 @@ def password_gate() -> None:
                 type="primary",
                 use_container_width=True,
             )
-
-        st.caption(
-            "This password is saved as a secure hash. "
-            "If it is forgotten, it cannot be recovered."
-        )
 
         if submitted:
             if not password:
