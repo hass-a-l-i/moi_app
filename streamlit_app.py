@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import json
+import secrets as secret_tokens
 import sqlite3
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -75,6 +78,20 @@ NEEDS = [
     "Something different",
     "Adventure",
     "I’m not sure yet",
+]
+
+
+ONE_STEP_CHECKLIST = [
+    "Healthy eating - calorie counting",
+    "Peppermint tea before bed",
+    "NO social media",
+    "Start fast 5pm",
+    "Reading/Studying",
+    "8 hours of sleep",
+    "2 litres of water",
+    "Outside activity",
+    "No sugar",
+    "Gym training",
 ]
 
 
@@ -598,11 +615,22 @@ def db_connection() -> sqlite3.Connection:
             energy INTEGER NOT NULL,
             rating INTEGER NOT NULL DEFAULT 5,
             feelings TEXT NOT NULL,
+            checklist TEXT NOT NULL DEFAULT '[]',
             note TEXT NOT NULL,
             gratitude TEXT NOT NULL,
             need TEXT NOT NULL,
             reflection TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
         """
@@ -629,6 +657,14 @@ def db_connection() -> sqlite3.Connection:
             """
         )
 
+    if "checklist" not in columns:
+        connection.execute(
+            """
+            ALTER TABLE entries
+            ADD COLUMN checklist TEXT NOT NULL DEFAULT '[]'
+            """
+        )
+
     return connection
 
 
@@ -636,11 +672,12 @@ def cloud_request(
     method: str,
     query: str = "",
     payload: dict | None = None,
+    table: str = "diary_entries",
 ) -> requests.Response:
 
     response = requests.request(
         method,
-        f"{SUPABASE_URL}/rest/v1/diary_entries{query}",
+        f"{SUPABASE_URL}/rest/v1/{table}{query}",
         headers={
             "apikey": SUPABASE_KEY,
             "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -656,6 +693,106 @@ def cloud_request(
 
     response.raise_for_status()
     return response
+
+
+PASSWORD_SETTING_KEY = "password_hash"
+PASSWORD_ITERATIONS = 260_000
+
+
+def get_setting(key: str) -> str:
+    if USE_CLOUD:
+        rows = cloud_request(
+            "GET",
+            f"?key=eq.{key}&select=value",
+            table="app_settings",
+        ).json()
+
+        return str(rows[0]["value"]) if rows else ""
+
+    with db_connection() as connection:
+        row = connection.execute(
+            "SELECT value FROM app_settings WHERE key = ?",
+            (key,),
+        ).fetchone()
+
+    return str(row[0]) if row else ""
+
+
+def set_setting(key: str, value: str) -> None:
+    now = datetime.now().isoformat(timespec="seconds")
+
+    if USE_CLOUD:
+        cloud_request(
+            "POST",
+            "?on_conflict=key",
+            {
+                "key": key,
+                "value": value,
+                "updated_at": now,
+            },
+            table="app_settings",
+        )
+        return
+
+    with db_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO app_settings (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key)
+            DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            """,
+            (key, value, now),
+        )
+
+
+def hash_password(password: str) -> str:
+    salt = secret_tokens.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        bytes.fromhex(salt),
+        PASSWORD_ITERATIONS,
+    ).hex()
+
+    return f"pbkdf2_sha256${PASSWORD_ITERATIONS}${salt}${digest}"
+
+
+def password_matches(password: str, stored_hash: str) -> bool:
+    try:
+        algorithm, iterations, salt, expected = stored_hash.split("$", 3)
+        iterations = int(iterations)
+    except ValueError:
+        return False
+
+    if algorithm != "pbkdf2_sha256":
+        return False
+
+    actual = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        bytes.fromhex(salt),
+        iterations,
+    ).hex()
+
+    return hmac.compare_digest(actual, expected)
+
+
+def saved_list(value: object) -> list:
+    if isinstance(value, list):
+        return value
+
+    if not value:
+        return []
+
+    try:
+        loaded = json.loads(str(value))
+    except json.JSONDecodeError:
+        return []
+
+    return loaded if isinstance(loaded, list) else []
 
 
 def load_entries() -> list[dict]:
@@ -682,11 +819,8 @@ def load_entries() -> list[dict]:
 
     for entry in entries:
         entry["rating"] = int(entry.get("rating") or 5)
-
-        try:
-            entry["feelings"] = json.loads(entry["feelings"])
-        except (TypeError, json.JSONDecodeError):
-            entry["feelings"] = []
+        entry["feelings"] = saved_list(entry.get("feelings"))
+        entry["checklist"] = saved_list(entry.get("checklist"))
 
     return entries
 
@@ -702,7 +836,8 @@ def save_entry(entry: dict) -> None:
             return
 
         local_entry = entry | {
-            "feelings": json.dumps(entry["feelings"])
+            "feelings": json.dumps(entry["feelings"]),
+            "checklist": json.dumps(entry["checklist"]),
         }
 
         fields = ", ".join(local_entry)
@@ -805,7 +940,7 @@ def navigation_buttons(
                 go("survey", step - 1)
 
     with right:
-        if step < 7:
+        if step < 8:
             if st.button(
                 "Continue →",
                 type="primary",
@@ -950,6 +1085,82 @@ def themed_dropdown(
     return selected
 
 
+def password_gate() -> None:
+    stored_hash = get_setting(PASSWORD_SETTING_KEY)
+
+    if stored_hash and st.session_state.get("authenticated"):
+        return
+
+    st.html(
+        f"""
+        <div class="hero">
+            <div class="hero-icon">{WORLD_ICON_HTML}</div>
+            <div class="eyebrow">Private diary</div>
+            <h1>{HER_NAME}</h1>
+            <p>Unlock your daily moment.</p>
+        </div>
+        """
+    )
+
+    if not stored_hash:
+        with st.form("set_password_form"):
+            password = st.text_input(
+                "Create password",
+                type="password",
+            )
+            confirmation = st.text_input(
+                "Confirm password",
+                type="password",
+            )
+            submitted = st.form_submit_button(
+                "Set password",
+                type="primary",
+                use_container_width=True,
+            )
+
+        st.caption(
+            "This password is saved as a secure hash. "
+            "If it is forgotten, it cannot be recovered."
+        )
+
+        if submitted:
+            if not password:
+                st.error("Please enter a password.")
+            elif len(password) < 8:
+                st.error("Please use at least 8 characters.")
+            elif password != confirmation:
+                st.error("The passwords do not match.")
+            else:
+                set_setting(
+                    PASSWORD_SETTING_KEY,
+                    hash_password(password),
+                )
+                st.session_state.authenticated = True
+                st.rerun()
+
+        st.stop()
+
+    with st.form("unlock_form"):
+        password = st.text_input(
+            "Password",
+            type="password",
+        )
+        submitted = st.form_submit_button(
+            "Unlock",
+            type="primary",
+            use_container_width=True,
+        )
+
+    if submitted:
+        if password_matches(password, stored_hash):
+            st.session_state.authenticated = True
+            st.rerun()
+
+        st.error("That password did not unlock the diary.")
+
+    st.stop()
+
+
 # ---------------------------------------------------------------------------
 # INITIAL STATE
 # ---------------------------------------------------------------------------
@@ -957,6 +1168,17 @@ def themed_dropdown(
 st.session_state.setdefault("view", "welcome")
 st.session_state.setdefault("step", 0)
 st.session_state.setdefault("answers", {})
+st.session_state.setdefault("authenticated", False)
+
+try:
+    password_gate()
+except Exception as error:
+    st.error(
+        "The diary couldn't reach its password settings. "
+        "Check the setup and app secrets."
+    )
+    st.exception(error)
+    st.stop()
 
 
 # Remove stale answers after options have been renamed.
@@ -997,6 +1219,12 @@ answers["feelings"] = [
     feeling
     for feeling in answers.get("feelings", [])
     if feeling in FEELINGS
+]
+
+answers["checklist"] = [
+    item
+    for item in answers.get("checklist", [])
+    if item in ONE_STEP_CHECKLIST
 ]
 
 try:
@@ -1063,6 +1291,7 @@ if st.session_state.view == "welcome":
                     "energy",
                     "rating",
                     "feelings",
+                    "checklist",
                     "need",
                     "gratitude",
                     "note",
@@ -1093,6 +1322,15 @@ if st.session_state.view == "welcome":
                     [],
                 )
                 if feeling in FEELINGS
+            ]
+
+            saved_answers["checklist"] = [
+                item
+                for item in saved_answers.get(
+                    "checklist",
+                    [],
+                )
+                if item in ONE_STEP_CHECKLIST
             ]
 
             st.session_state.answers = saved_answers
@@ -1145,6 +1383,7 @@ elif st.session_state.view == "survey":
         "What do you need right now?",
         "What are you grateful for?",
         "What are you looking forward to tomorrow?",
+        "One step at a time checklist",
         DAILY_PROMPT,
     ]
 
@@ -1286,7 +1525,19 @@ elif st.session_state.view == "survey":
 
         navigation_buttons(step)
 
-    # Question 8: rotating daily reflection
+    # Question 8: one step at a time checklist
+    elif step == 7:
+        st.markdown("Tick anything that applies today.")
+
+        choose_many(
+            "checklist",
+            ONE_STEP_CHECKLIST,
+            columns=2,
+        )
+
+        navigation_buttons(step)
+
+    # Question 9: rotating daily reflection
     else:
         answers["reflection"] = st.text_area(
             "Reflection",
@@ -1303,7 +1554,7 @@ elif st.session_state.view == "survey":
                 "← Back",
                 use_container_width=True,
             ):
-                go("survey", 6)
+                go("survey", 7)
 
         with right:
             if st.button(
@@ -1340,6 +1591,10 @@ elif st.session_state.view == "survey":
                         "rating": answers.get("rating", 5),
                         "feelings": answers.get(
                             "feelings",
+                            [],
+                        ),
+                        "checklist": answers.get(
+                            "checklist",
                             [],
                         ),
                         "need": ", ".join(selected_needs),
@@ -1493,7 +1748,13 @@ elif st.session_state.view == "journey":
     st.markdown("### Your Journey")
 
     range_options = ["Last week", "Last month", "All time"]
-    focus_options = ["All", "Mood", "Energy", "Daily rating"]
+    focus_options = [
+        "All",
+        "Mood",
+        "Energy",
+        "Checklist",
+        "Daily rating",
+    ]
     st.session_state.setdefault("chart_range", "Last week")
     st.session_state.setdefault("chart_focus", "All")
 
@@ -1531,15 +1792,15 @@ elif st.session_state.view == "journey":
     column_1.metric("Total", len(entries))
     column_2.metric("Streak", f"{calculate_streak(entries)} 🔥")
     column_3.metric(
-        "Avg mood",
+        "Mood Av.",
         f"{sum(int(e['mood']) for e in chart_entries) / n:.1f}/5" if n else "—",
     )
     column_4.metric(
-        "Avg energy",
+        "Energy Av.",
         f"{sum(int(e['energy']) for e in chart_entries) / n:.1f}/5" if n else "—",
     )
     column_5.metric(
-        "Avg rating",
+        "Rating Av.",
         f"{sum(int(e.get('rating', 5)) for e in chart_entries) / n:.1f}/10" if n else "—",
     )
 
@@ -1550,10 +1811,11 @@ elif st.session_state.view == "journey":
     chart = pd.DataFrame(chart_entries)
     chart["Date"] = pd.to_datetime(chart["entry_date"])
     chart["Rating"] = chart.get("rating", 5).fillna(5).astype(int)
+    chart["Checklist"] = chart["checklist"].apply(len)
     chart = chart.sort_values("Date").set_index("Date")
 
     chart_data = (
-        chart[["mood", "energy", "Rating"]]
+        chart[["mood", "energy", "Checklist", "Rating"]]
         .rename(
             columns={
                 "mood": "Mood",
@@ -1584,9 +1846,10 @@ elif st.session_state.view == "journey":
         )
 
     tracker_colors = {
-        "Mood": "#b25168",
-        "Energy": "#e67a2e",
-        "Daily rating": ACCENT,
+        "Mood": "#3f5f96",
+        "Energy": "#b7652a",
+        "Checklist": "#3b7f63",
+        "Daily rating": "#d45d8c",
     }
 
     visible = list(chart_data["Tracker"].unique())
@@ -1682,6 +1945,19 @@ elif st.session_state.view == "journey":
                 st.write(
                     "**Felt:** "
                     + ", ".join(saved_feelings)
+                )
+
+            saved_checklist = entry.get("checklist", [])
+
+            st.write(
+                f"**Checklist:** "
+                f"{len(saved_checklist)}/{len(ONE_STEP_CHECKLIST)}"
+            )
+
+            if saved_checklist:
+                st.write(
+                    "**Completed:** "
+                    + ", ".join(saved_checklist)
                 )
 
             st.write(

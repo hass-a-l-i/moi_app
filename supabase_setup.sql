@@ -5,6 +5,7 @@ create table if not exists public.diary_entries (
   energy smallint not null check (energy between 1 and 5),
   rating smallint not null default 5 check (rating between 1 and 10),
   feelings jsonb not null default '[]'::jsonb,
+  checklist jsonb not null default '[]'::jsonb,
   note text not null default '',
   gratitude text not null default '',
   need text not null default '',
@@ -13,11 +14,21 @@ create table if not exists public.diary_entries (
   updated_at timestamp with time zone not null
 );
 
+create table if not exists public.app_settings (
+  key text primary key,
+  value text not null,
+  updated_at timestamp with time zone not null
+);
+
 alter table public.diary_entries enable row level security;
+alter table public.app_settings enable row level security;
 alter table public.diary_entries add column if not exists reflection text not null default '';
 alter table public.diary_entries add column if not exists rating smallint not null default 5 check (rating between 1 and 10);
+alter table public.diary_entries add column if not exists checklist jsonb not null default '[]'::jsonb;
 
 -- Deliberately create no public policies. The app talks to this table only
 -- with the server-side secret key stored in Streamlit's encrypted secrets.
 revoke all on table public.diary_entries from anon, authenticated;
+revoke all on table public.app_settings from anon, authenticated;
 grant all on table public.diary_entries to service_role;
+grant all on table public.app_settings to service_role;

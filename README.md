@@ -54,20 +54,21 @@ git push -u origin main
 5. Open **Advanced settings** and paste these secrets, using your real values:
 
 ```toml
-APP_PIN = "a-long-pin-only-the-two-of-you-know"
 SUPABASE_URL = "https://YOUR-PROJECT.supabase.co"
 SUPABASE_SECRET_KEY = "YOUR-SERVER-SIDE-SECRET-KEY"
 ```
 
 6. Click **Deploy**. Streamlit will give you a `*.streamlit.app` link to send her.
+7. On the first visit, create the app password. After that, the same password
+   unlocks the diary.
 
 ## Privacy notes
 
 - The GitHub code can be public, but use a private repository if you prefer.
-- The PIN and database key belong only in Streamlit Secrets, never in a tracked
+- The database key belongs only in Streamlit Secrets, never in a tracked
   `secrets.toml` file. `.gitignore` already excludes the local secrets file.
-- Choose a long PIN/passphrase. This simple gate is lovely for a personal app,
-  but it is not a substitute for full user authentication.
+- Choose a long password. It is saved as a secure hash, not plain text, but this
+  simple gate is not a substitute for full user authentication.
 - Supabase Row Level Security is enabled and public database roles are revoked;
   the server-side Streamlit app is the only intended database client.
 - She can download JSON backups from the Journey tab.
@@ -75,4 +76,4 @@ SUPABASE_SECRET_KEY = "YOUR-SERVER-SIDE-SECRET-KEY"
 ## Optional local cloud test
 
 Copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml`, fill in the
-three values, and restart Streamlit. Never commit that file.
+two values, and restart Streamlit. Never commit that file.
